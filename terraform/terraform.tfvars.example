@@ -1,0 +1,4 @@
+# Copy this file to terraform.tfvars and fill in your values
+aws_region   = "eu-central-1"
+project_name = "phi3-inference"
+api_key      = "your-secret-api-key-here"
