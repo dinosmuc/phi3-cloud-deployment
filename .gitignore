@@ -27,3 +27,6 @@ __pycache__/
 
 # Docker
 *.tar
+
+# Sensitive files
+secrets.yml
