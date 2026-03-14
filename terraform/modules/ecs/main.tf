@@ -1,0 +1,414 @@
+# Look up the latest ECS-optimised GPU AMI
+data "aws_ssm_parameter" "ecs_gpu_ami" {
+  name = "/aws/service/ecs/optimized-ami/amazon-linux-2023/gpu/recommended"
+}
+
+locals {
+  ecs_gpu_ami_id = jsondecode(data.aws_ssm_parameter.ecs_gpu_ami.value)["image_id"]
+}
+
+# Role 1: EC2 Instance Role — allows ECS agent to register with cluster
+resource "aws_iam_role" "ec2_instance" {
+  name = "${var.project_name}-ec2-instance-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-ec2-instance-role"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_ssm" {
+  role       = aws_iam_role.ec2_instance.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_ecs" {
+  role       = aws_iam_role.ec2_instance.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role"
+}
+
+resource "aws_iam_role_policy_attachment" "ec2_ecr" {
+  role       = aws_iam_role.ec2_instance.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+}
+
+resource "aws_iam_instance_profile" "ec2_instance" {
+  name = "${var.project_name}-ec2-instance-profile"
+  role = aws_iam_role.ec2_instance.name
+}
+
+# Role 2: ECS Task Execution Role — allows ECS to pull images and write logs
+resource "aws_iam_role" "ecs_task_execution" {
+  name = "${var.project_name}-ecs-task-execution-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-ecs-task-execution-role"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_execution" {
+  role       = aws_iam_role.ecs_task_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# Role 3: ECS Task Role — permissions for the running containers
+resource "aws_iam_role" "ecs_task" {
+  name = "${var.project_name}-ecs-task-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-ecs-task-role"
+  }
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_task_cloudwatch" {
+  role       = aws_iam_role.ecs_task.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+}
+
+# LAUNCH TEMPLATE
+resource "aws_launch_template" "ecs" {
+  name          = "${var.project_name}-launch-template"
+  image_id      = local.ecs_gpu_ami_id
+  instance_type = var.instance_type
+
+  iam_instance_profile {
+    arn = aws_iam_instance_profile.ec2_instance.arn
+  }
+
+  user_data = base64encode(<<-EOF
+    #!/bin/bash
+    echo "ECS_CLUSTER=${aws_ecs_cluster.main.name}" >> /etc/ecs/ecs.config
+    echo "ECS_ENABLE_GPU_SUPPORT=true" >> /etc/ecs/ecs.config
+  EOF
+  )
+
+  block_device_mappings {
+    device_name = "/dev/xvda"
+
+    ebs {
+      volume_size           = 50
+      volume_type           = "gp3"
+      delete_on_termination = true
+    }
+  }
+
+  monitoring {
+    enabled = true
+  }
+
+  tag_specifications {
+    resource_type = "instance"
+
+    tags = {
+      Name = "${var.project_name}-ecs-instance"
+    }
+  }
+
+  tags = {
+    Name = "${var.project_name}-launch-template"
+  }
+}
+
+
+# AUTO SCALING GROUP
+resource "aws_autoscaling_group" "ecs" {
+  name                = "${var.project_name}-asg"
+  vpc_zone_identifier = var.private_subnet_ids
+  min_size            = 0
+  max_size            = var.max_capacity
+  desired_capacity    = 0
+
+  launch_template {
+    id      = aws_launch_template.ecs.id
+    version = "$Latest"
+  }
+
+  protect_from_scale_in = true
+
+  tag {
+    key                 = "Name"
+    value               = "${var.project_name}-ecs-instance"
+    propagate_at_launch = true
+  }
+
+  tag {
+    key                 = "AmazonECSManaged"
+    value               = true
+    propagate_at_launch = true
+  }
+
+  lifecycle {
+    ignore_changes = [desired_capacity]
+  }
+}
+
+
+# ECS CLUSTER
+resource "aws_ecs_cluster" "main" {
+  name = "${var.project_name}-cluster"
+
+  tags = {
+    Name = "${var.project_name}-cluster"
+  }
+}
+
+
+# CAPACITY PROVIDER
+resource "aws_ecs_capacity_provider" "main" {
+  name = "${var.project_name}-capacity-provider"
+
+  auto_scaling_group_provider {
+    auto_scaling_group_arn         = aws_autoscaling_group.ecs.arn
+    managed_termination_protection = "ENABLED"
+
+    managed_scaling {
+      maximum_scaling_step_size = 1
+      minimum_scaling_step_size = 1
+      status                    = "ENABLED"
+      target_capacity           = 100
+    }
+  }
+
+  tags = {
+    Name = "${var.project_name}-capacity-provider"
+  }
+}
+
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = [aws_ecs_capacity_provider.main.name]
+
+  default_capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.main.name
+    weight            = 1
+    base              = 1
+  }
+}
+
+
+# CLOUDWATCH LOG GROUPS
+resource "aws_cloudwatch_log_group" "tgi" {
+  name              = "/ecs/${var.project_name}/tgi"
+  retention_in_days = 7
+
+  tags = {
+    Name = "${var.project_name}-tgi-logs"
+  }
+}
+
+resource "aws_cloudwatch_log_group" "nginx" {
+  name              = "/ecs/${var.project_name}/nginx"
+  retention_in_days = 7
+
+  tags = {
+    Name = "${var.project_name}-nginx-logs"
+  }
+}
+
+
+# TASK DEFINITION
+resource "aws_ecs_task_definition" "main" {
+  family                   = var.project_name
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["EC2"]
+  execution_role_arn       = aws_iam_role.ecs_task_execution.arn
+  task_role_arn            = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "tgi"
+      image     = "${var.ecr_repository_url}:tgi"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = 8080
+          protocol      = "tcp"
+        }
+      ]
+
+      command = [
+        "--model-id", "/data/models/phi3-awq",
+        "--quantize", "awq",
+        "--max-input-length", "2048",
+        "--max-total-tokens", "4096"
+      ]
+
+      resourceRequirements = [
+        {
+          type  = "GPU"
+          value = "1"
+        }
+      ]
+
+      memory = 14336
+      cpu    = 3072
+
+      healthCheck = {
+        command     = ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+        interval    = 30
+        timeout     = 10
+        retries     = 5
+        startPeriod = 120
+      }
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.tgi.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "tgi"
+        }
+      }
+    },
+    {
+      name      = "nginx"
+      image     = "${var.ecr_repository_url}:nginx"
+      essential = true
+
+      portMappings = [
+        {
+          containerPort = 80
+          protocol      = "tcp"
+        }
+      ]
+
+      memory = 256
+      cpu    = 256
+
+      environment = [
+        {
+          name  = "API_KEY"
+          value = var.api_key
+        }
+      ]
+
+      dependsOn = [
+        {
+          containerName = "tgi"
+          condition     = "HEALTHY"
+        }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = aws_cloudwatch_log_group.nginx.name
+          "awslogs-region"        = var.aws_region
+          "awslogs-stream-prefix" = "nginx"
+        }
+      }
+    }
+  ])
+
+  tags = {
+    Name = "${var.project_name}-task-definition"
+  }
+}
+
+
+# ECS SERVICE
+resource "aws_ecs_service" "main" {
+  name            = "${var.project_name}-service"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.main.arn
+  desired_count   = 1
+
+  capacity_provider_strategy {
+    capacity_provider = aws_ecs_capacity_provider.main.name
+    weight            = 1
+    base              = 1
+  }
+
+  network_configuration {
+    subnets         = var.private_subnet_ids
+    security_groups = [var.ecs_security_group_id]
+  }
+
+  load_balancer {
+    target_group_arn = var.target_group_arn
+    container_name   = "nginx"
+    container_port   = 80
+  }
+
+  health_check_grace_period_seconds = 300
+
+  deployment_minimum_healthy_percent = 0
+  deployment_maximum_percent         = 200
+
+  depends_on = [aws_ecs_cluster_capacity_providers.main]
+
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+
+  tags = {
+    Name = "${var.project_name}-service"
+  }
+}
+
+
+# AUTO SCALING FOR ECS SERVICE
+resource "aws_appautoscaling_target" "ecs" {
+  max_capacity       = var.max_capacity
+  min_capacity       = var.min_capacity
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.main.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+  service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "ecs_cpu" {
+  name               = "${var.project_name}-cpu-scaling"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs.resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs.service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+
+    target_value       = 70
+    scale_in_cooldown  = 900
+    scale_out_cooldown = 120
+  }
+}
