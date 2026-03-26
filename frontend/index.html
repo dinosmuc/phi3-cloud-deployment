@@ -1,2 +1,31 @@
 <!DOCTYPE html>
-<html><head><title>Phi-3 Chat</title></head><body><h1>Phi-3 Chat</h1></body></html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phi-3 Chat</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="chat-container">
+        <header class="chat-header">
+            <h1>Phi-3 Chat</h1>
+            <span class="status" id="status">Disconnected</span>
+        </header>
+
+        <div class="api-key-bar" id="apiKeyBar">
+            <input type="password" id="apiKeyInput" placeholder="Enter your API key" />
+            <button id="connectBtn">Connect</button>
+        </div>
+
+        <div class="messages" id="messages"></div>
+
+        <div class="input-bar">
+            <textarea id="userInput" placeholder="Type a message..." rows="1" disabled></textarea>
+            <button id="sendBtn" disabled>Send</button>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
