@@ -1,4 +1,4 @@
-FROM ghcr.io/huggingface/text-generation-inference:latest
+FROM ghcr.io/huggingface/text-generation-inference:2.4.1
 
 RUN pip install huggingface_hub && \
     huggingface-cli download \

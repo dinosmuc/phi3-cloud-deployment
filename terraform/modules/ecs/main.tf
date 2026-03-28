@@ -98,9 +98,30 @@ resource "aws_iam_role" "ecs_task" {
   }
 }
 
+resource "aws_iam_policy" "ecs_task_logs" {
+  name = "${var.project_name}-ecs-task-logs"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = [
+          "${aws_cloudwatch_log_group.tgi.arn}:*",
+          "${aws_cloudwatch_log_group.nginx.arn}:*"
+        ]
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy_attachment" "ecs_task_cloudwatch" {
   role       = aws_iam_role.ecs_task.name
-  policy_arn = "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+  policy_arn = aws_iam_policy.ecs_task_logs.arn
 }
 
 # LAUNCH TEMPLATE
@@ -219,7 +240,7 @@ resource "aws_ecs_cluster_capacity_providers" "main" {
   default_capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.main.name
     weight            = 1
-    base              = 1
+    base              = 0
   }
 }
 
@@ -350,12 +371,12 @@ resource "aws_ecs_service" "main" {
   name            = "${var.project_name}-service"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.main.arn
-  desired_count   = 1
+  desired_count   = 0
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.main.name
     weight            = 1
-    base              = 1
+    base              = 0
   }
 
   network_configuration {
