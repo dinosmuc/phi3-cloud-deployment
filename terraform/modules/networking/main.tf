@@ -275,3 +275,48 @@ resource "aws_vpc_endpoint" "cloudwatch_logs" {
     Name = "${var.project_name}-cloudwatch-logs-endpoint"
   }
 }
+
+# ECS API Interface Endpoint (agent registration)
+resource "aws_vpc_endpoint" "ecs" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecs"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+
+  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
+  security_group_ids = [aws_security_group.vpc_endpoints.id]
+
+  tags = {
+    Name = "${var.project_name}-ecs-endpoint"
+  }
+}
+
+# ECS Agent Interface Endpoint (agent communication)
+resource "aws_vpc_endpoint" "ecs_agent" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecs-agent"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+
+  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
+  security_group_ids = [aws_security_group.vpc_endpoints.id]
+
+  tags = {
+    Name = "${var.project_name}-ecs-agent-endpoint"
+  }
+}
+
+# ECS Telemetry Interface Endpoint (agent health reporting)
+resource "aws_vpc_endpoint" "ecs_telemetry" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecs-telemetry"
+  vpc_endpoint_type   = "Interface"
+  private_dns_enabled = true
+
+  subnet_ids         = [aws_subnet.private_1.id, aws_subnet.private_2.id]
+  security_group_ids = [aws_security_group.vpc_endpoints.id]
+
+  tags = {
+    Name = "${var.project_name}-ecs-telemetry-endpoint"
+  }
+}
