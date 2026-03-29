@@ -130,6 +130,8 @@ resource "aws_launch_template" "ecs" {
   image_id      = local.ecs_gpu_ami_id
   instance_type = var.instance_type
 
+  vpc_security_group_ids = [var.ecs_security_group_id]
+
   iam_instance_profile {
     arn = aws_iam_instance_profile.ec2_instance.arn
   }
@@ -287,9 +289,9 @@ resource "aws_ecs_task_definition" "main" {
       ]
 
       command = [
-        "--model-id", "/data/models/phi3-awq",
-        "--quantize", "awq",
-        "--max-input-length", "2048",
+        "--model-id", "/data/models/phi3",
+        "--port", "8080",
+        "--max-input-length", "2046",
         "--max-total-tokens", "4096"
       ]
 
