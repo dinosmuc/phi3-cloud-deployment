@@ -13,10 +13,12 @@ terraform {
     }
   }
 
+  // Partial backend configuration. The state bucket name must be globally unique,
+  // so it cannot be hardcoded here — a clean clone in another AWS account would
+  // fail on the first init. deploy.sh creates the bucket and writes backend.hcl,
+  // then runs: terraform init -backend-config=backend.hcl
   backend "s3" {
-    bucket       = "gemma-inference-tfstate-ds"
     key          = "gemma-inference/terraform.tfstate"
-    region       = "eu-central-1"
     encrypt      = true
     use_lockfile = true
   }

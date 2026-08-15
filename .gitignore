@@ -6,6 +6,7 @@
 terraform.tfvars
 *.auto.tfvars
 tfplan
+backend.hcl
 
 # AWS
 *.pem
@@ -27,6 +28,9 @@ Thumbs.db
 __pycache__/
 *.pyc
 .env
+.pytest_cache/
+venv/
+.venv/
 
 # Docker
 *.tar

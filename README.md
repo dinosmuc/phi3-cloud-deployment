@@ -12,10 +12,10 @@ A personal project exploring end-to-end LLM deployment on AWS — the model runs
 
 ## Highlights
 
-- **High availability** — VPC across 2 AZs; one NAT Gateway per AZ; ALB and Auto Scaling Group span both.
+- **Multi-AZ infrastructure** — VPC across 2 AZs; one NAT Gateway per AZ; ALB and Auto Scaling Group span both. See the availability caveat under [Limitations](#limitations).
 - **Cost-efficient** — scale-to-zero: 0 GPU when idle, wakes on the first request, returns to 0 after 15 min.
-- **Secure** — private subnets (no public IP on the GPU), WAF + rate limit, dual-key auth, secrets in SSM SecureString (KMS), private S3 served only via CloudFront OAC.
-- **Reproducible** — 100% Terraform, 6 modules, one-command deploy.
+- **Secure** — private subnets (no public IP on the GPU), WAF + per-client rate limit, dual-key auth, secrets in SSM SecureString (KMS), private S3 served only via CloudFront OAC.
+- **Reproducible** — 100% Terraform, 6 modules, pinned dependencies, one-command deploy into any AWS account.
 
 ## Stack
 
@@ -28,41 +28,91 @@ A personal project exploring end-to-end LLM deployment on AWS — the model runs
 | Edge | CloudFront (OAC) + WAFv2 · ALB across 2 AZs |
 | Secrets | SSM Parameter Store (SecureString, KMS) |
 | Observability | CloudWatch dashboard + alarms · SNS email |
+| CI | GitHub Actions — format, validate, unit tests (no AWS access) |
 
 ## Prerequisites
 
-- AWS account + CLI configured. GPU quota: **Running On-Demand G and VT instances ≥ 4 vCPU**.
-- Docker and Terraform ≥ 1.10.
-- A one-time S3 state bucket (Terraform cannot create its own backend):
+**Tools** — these are the versions the project was last built and tested with; the minimums are what it actually requires.
 
-  ```bash
-  aws s3api create-bucket --bucket gemma-inference-tfstate-ds --region eu-central-1 \
-    --create-bucket-configuration LocationConstraint=eu-central-1
-  aws s3api put-bucket-versioning --bucket gemma-inference-tfstate-ds \
-    --versioning-configuration Status=Enabled
-  ```
+| Tool | Tested | Minimum | Needed for |
+|---|---|---|---|
+| Terraform | 1.15.6 | 1.10.0 | everything (`use_lockfile` needs ≥ 1.10) |
+| AWS CLI | 2.34.0 | 2.x | deploy, state bucket, cache invalidation |
+| Docker | 29.5.3 | 20.x | building the images |
+| Python | 3.14 (image) / 3.11 (local tests) | 3.11 | proxy + tests |
+| Node.js | 24 | 22 | frontend tests only |
 
-## Configure
+**AWS account**
+
+- Credentials configured (`aws configure`) with permission to create VPC, ECS, EC2, ALB, CloudFront, S3, ECR, IAM, SSM, WAF and CloudWatch resources.
+- GPU quota: **Running On-Demand G and VT instances ≥ 4 vCPU**. This is not granted by default — request it in Service Quotas before deploying, approval can take a day.
+
+**Hugging Face**
+
+`google/gemma-4-E2B-it` requires accepting Google's licence on the model page. Once accepted, create a read token and export it before deploying:
 
 ```bash
-cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+export HF_TOKEN=hf_...
 ```
-
-Set `public_api_key`, `internal_api_key` (must differ), and `alert_email`.
 
 ## Deploy
 
+From a clean clone, in any AWS account:
+
 ```bash
+git clone https://github.com/dinosmuc/llm-cloud-deployment.git
+cd llm-cloud-deployment
+
+cp terraform/terraform.tfvars.example terraform/terraform.tfvars
+# set public_api_key, internal_api_key (must differ) and alert_email
+
+export HF_TOKEN=hf_...
 ./scripts/deploy.sh
 ```
 
-This runs the required order: **create ECR → build & push images → apply the rest**. The order matters — the images must exist before any task scales up. (`terraform output` then prints `frontend_url` and `public_api_key`.)
+`deploy.sh` does everything, in the order that matters:
+
+1. **Preflight** — checks the tools, credentials, Docker daemon and `terraform.tfvars`, and fails early with a clear message if anything is missing.
+2. **State backend** — Terraform cannot create its own backend, so the script creates an S3 bucket named `<project_name>-tfstate-<your-account-id>` (versioned, encrypted, public access blocked), writes `terraform/backend.hcl`, and runs `terraform init -backend-config=backend.hcl`. The account ID keeps the globally-unique bucket name collision-free, which is why nothing is hardcoded. Re-runs reuse the existing bucket.
+3. **ECR first** — the repository has to exist before images can be pushed, so it is applied on its own with `-target=module.ecr`.
+4. **Build and push** — the repository URL is read back with `terraform output -raw ecr_repository_url` and passed to `build_and_push.sh`, so the build can never target a different repo or region than the one ECS reads from. The vLLM image bakes in the model weights and takes 10–15 min the first time.
+5. **Apply the rest** — shows a plan, then applies on confirmation.
+
+To run Terraform by hand afterwards, point it at the generated backend config:
+
+```bash
+cd terraform
+terraform init -backend-config=backend.hcl
+terraform plan
+```
 
 ## Use
 
-Open `frontend_url`, paste the `public_api_key`, and chat.
+```bash
+cd terraform
+terraform output frontend_url
+terraform output -raw public_api_key    # -raw is required; the value is marked sensitive
+```
+
+Open `frontend_url`, paste the key, and chat.
 
 The **first request after idle** triggers a cold start (~5 min when warm, up to ~15 min on a brand-new deploy) while the GPU launches and vLLM loads the model — the UI shows progress and resends automatically. After that, responses stream sub-second to first token.
+
+## Checks
+
+```bash
+pip install -r tests/requirements.txt
+./scripts/check.sh
+```
+
+Runs offline — no AWS credentials, no deployment, no Docker:
+
+- `terraform fmt -check` and `terraform validate` (with `-backend=false`)
+- shell syntax (`bash -n`) and Python syntax
+- **proxy tests** — a missing or wrong `x-api-key` is rejected with 401; a valid one is swapped for the internal Bearer token and the streamed response passes through byte-for-byte
+- **frontend test** — an SSE event split across network chunks is reassembled, checked at every possible split point
+
+The same script runs in GitHub Actions on every push and pull request (`.github/workflows/ci.yml`). CI never touches AWS and needs no secrets.
 
 ## Teardown
 
@@ -70,17 +120,39 @@ The **first request after idle** triggers a cold start (~5 min when warm, up to 
 ./scripts/destroy.sh        # or: cd terraform && terraform destroy
 ```
 
-If `destroy` times out while the ECS service drains, just run it again. The S3 state bucket is external infrastructure — delete it manually if you no longer need it.
+If `destroy` times out while the ECS service drains, just run it again. The state bucket is created outside the stack and is left alone — delete it manually if you no longer need it.
 
 ## Cost
 
-Idle baseline (2 NAT Gateways + ALB + WAF + CloudWatch) ≈ **$0.10/hour**, continuous. The GPU (~$0.98/hour) runs only while serving. Tear down between sessions to avoid the idle baseline.
+Idle baseline ≈ **$0.14/hour** (~$100/month), continuous, whether or not anyone uses it:
 
-## Notes
+| Component | Approx. hourly |
+|---|---|
+| 2 × NAT Gateway | $0.104 |
+| ALB | $0.027 |
+| WAF (web ACL + 2 rules) | $0.010 |
 
-- HTTPS terminates at CloudFront (edge); full end-to-end TLS (ACM + Route 53 custom domain) is future work.
-- Cold-start latency is inherent to GPU scale-to-zero.
-- A vCPU quota of 4 limits the demo to one `g6.xlarge` at a time.
+The GPU (~$0.98/hour for `g6.xlarge`) runs only while serving. Tear the stack down between sessions to avoid the idle baseline — that is the single biggest saving.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `VcpuLimitExceeded` / instance never launches | GPU quota not granted. Request **Running On-Demand G and VT instances** ≥ 4 vCPU in Service Quotas. |
+| Image build fails downloading the model | `HF_TOKEN` not exported, or Google's licence not accepted on the model page. |
+| `denied: Your authorization token has expired` on push | ECR login expires after 12 h. Re-run `./scripts/deploy.sh`, or re-authenticate manually with `aws ecr get-login-password`. |
+| No alarm emails | The SNS subscription must be confirmed from the AWS email sent to `alert_email`. Until then nothing is delivered. |
+| UI sits on "Still warming up" | Normal for a cold start. It retries for ~22 min. Beyond that, check the ECS service events and the `/ecs/<project>/vllm` log group. |
+| `terraform init` asks for a bucket | You ran it without the backend config. Use `terraform init -backend-config=backend.hcl`, or just run `./scripts/deploy.sh`. |
+| API returns 403 when called directly | Expected — the WAF rate-limit rule blocks requests that arrive without CloudFront's `X-Forwarded-For` header. Go through the CloudFront URL. |
+
+## Limitations
+
+- **Availability.** The VPC, ALB, NAT Gateways and Auto Scaling Group span two AZs, so the *infrastructure* is multi-AZ. Inference is not: the default configuration runs a single GPU task and scales to zero, so it is unavailable during a cold start and is not active-active. Continuous availability would mean `min_capacity = 1` and paying for an always-on GPU.
+- **TLS.** HTTPS terminates at CloudFront. The CloudFront → ALB hop is plain **HTTP** today; end-to-end TLS (ACM certificate + Route 53 custom domain) is future work.
+- **Cold start.** Inherent to GPU scale-to-zero — the trade for not paying ~$0.98/hour to idle.
+- **Scale ceiling.** A vCPU quota of 4 limits the demo to one `g6.xlarge` at a time, even though `max_capacity` is 3.
+- **Single-turn chat.** The UI sends the system prompt plus the current message only; there is no conversation history.
 
 ## License
 

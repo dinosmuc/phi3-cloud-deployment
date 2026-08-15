@@ -119,6 +119,8 @@ async function sendMessage() {
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
+        // Reassembles events split across chunk boundaries — see sse.js.
+        const sse = new SSEBuffer();
         let fullText = "";
 
         while (true) {
@@ -126,11 +128,8 @@ async function sendMessage() {
             if (done) break;
 
             const chunk = decoder.decode(value, { stream: true });
-            const lines = chunk.split("\n");
 
-            for (const line of lines) {
-                if (!line.startsWith("data:")) continue;
-                const data = line.slice(5).trim();
+            for (const data of sse.push(chunk)) {
                 if (data === "[DONE]") continue;
 
                 try {

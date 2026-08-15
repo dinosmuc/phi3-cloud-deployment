@@ -1,0 +1,3 @@
+# The proxy's own pins, so the tests run against exactly what ships in the image.
+-r ../containers/proxy/requirements.txt
+pytest==9.1.1

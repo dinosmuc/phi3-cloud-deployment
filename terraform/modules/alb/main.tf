@@ -94,8 +94,21 @@ resource "aws_wafv2_web_acl" "main" {
 
     statement {
       rate_based_statement {
-        limit              = 1000
-        aggregate_key_type = "IP"
+        limit = 1000
+
+        // The ALB sits behind CloudFront, so the source IP it sees is a CloudFront
+        // edge server, not the visitor. Aggregating on "IP" would therefore share
+        // one budget across everyone behind the same edge. Count the client IP that
+        // CloudFront forwards instead.
+        //
+        // fallback_behavior MATCH blocks requests that arrive without the header,
+        // which also means the ALB only answers traffic that came through CloudFront.
+        aggregate_key_type = "FORWARDED_IP"
+
+        forwarded_ip_config {
+          header_name       = "X-Forwarded-For"
+          fallback_behavior = "MATCH"
+        }
       }
     }
 

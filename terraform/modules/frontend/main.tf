@@ -80,6 +80,14 @@ resource "aws_s3_object" "style_css" {
   etag         = filemd5("${path.module}/../../../frontend/style.css")
 }
 
+resource "aws_s3_object" "sse_js" {
+  bucket       = aws_s3_bucket.frontend.id
+  key          = "sse.js"
+  source       = "${path.module}/../../../frontend/sse.js"
+  content_type = "application/javascript"
+  etag         = filemd5("${path.module}/../../../frontend/sse.js")
+}
+
 resource "aws_s3_object" "app_js" {
   bucket = aws_s3_bucket.frontend.id
   key    = "app.js"
@@ -193,5 +201,24 @@ resource "aws_cloudfront_distribution" "frontend" {
 
   tags = {
     Name = "${var.project_name}-cloudfront"
+  }
+}
+
+
+// CACHE INVALIDATION
+// The static files are cached at the edge for a day (default_ttl), so without this
+// a re-deploy would keep serving the previous frontend. Invalidate whenever any of
+// the uploaded files changes. Uses the AWS CLI, which deploy.sh already requires.
+
+resource "terraform_data" "invalidate_cache" {
+  triggers_replace = [
+    aws_s3_object.index_html.etag,
+    aws_s3_object.style_css.etag,
+    aws_s3_object.sse_js.etag,
+    md5(aws_s3_object.app_js.content),
+  ]
+
+  provisioner "local-exec" {
+    command = "aws cloudfront create-invalidation --distribution-id ${aws_cloudfront_distribution.frontend.id} --paths '/*'"
   }
 }
