@@ -14,7 +14,7 @@ A personal project exploring end-to-end LLM deployment on AWS — the model runs
 
 - **Multi-AZ infrastructure** — VPC across 2 AZs; one NAT Gateway per AZ; ALB and Auto Scaling Group span both. See the availability caveat under [Limitations](#limitations).
 - **Cost-efficient** — scale-to-zero: 0 GPU when idle, wakes on the first request, returns to 0 after 15 min.
-- **Secure** — private subnets (no public IP on the GPU), WAF + per-client rate limit, dual-key auth, secrets in SSM SecureString (KMS), private S3 served only via CloudFront OAC.
+- **Secure** — private subnets (no public IP on the GPU), WAF rate limiting, dual-key auth, secrets in SSM SecureString (KMS) and Hugging Face token via BuildKit secret, private S3 served only via CloudFront OAC.
 - **Reproducible** — 100% Terraform, 6 modules, pinned dependencies, one-command deploy into any AWS account.
 
 ## Stack
@@ -105,7 +105,7 @@ pip install -r tests/requirements.txt
 ./scripts/check.sh
 ```
 
-Runs offline — no AWS credentials, no deployment, no Docker:
+Runs without AWS credentials, deployment or Docker (a fresh `terraform init` does download providers from the registry):
 
 - `terraform fmt -check` and `terraform validate` (with `-backend=false`)
 - shell syntax (`bash -n`) and Python syntax
@@ -144,12 +144,13 @@ The GPU (~$0.98/hour for `g6.xlarge`) runs only while serving. Tear the stack do
 | No alarm emails | The SNS subscription must be confirmed from the AWS email sent to `alert_email`. Until then nothing is delivered. |
 | UI sits on "Still warming up" | Normal for a cold start. It retries for ~22 min. Beyond that, check the ECS service events and the `/ecs/<project>/vllm` log group. |
 | `terraform init` asks for a bucket | You ran it without the backend config. Use `terraform init -backend-config=backend.hcl`, or just run `./scripts/deploy.sh`. |
-| API returns 403 when called directly | Expected — the WAF rate-limit rule blocks requests that arrive without CloudFront's `X-Forwarded-For` header. Go through the CloudFront URL. |
 
 ## Limitations
 
 - **Availability.** The VPC, ALB, NAT Gateways and Auto Scaling Group span two AZs, so the *infrastructure* is multi-AZ. Inference is not: the default configuration runs a single GPU task and scales to zero, so it is unavailable during a cold start and is not active-active. Continuous availability would mean `min_capacity = 1` and paying for an always-on GPU.
 - **TLS.** HTTPS terminates at CloudFront. The CloudFront → ALB hop is plain **HTTP** today; end-to-end TLS (ACM certificate + Route 53 custom domain) is future work.
+- **The ALB is publicly reachable.** Its security group accepts internet traffic and the HTTP listener forwards by default, so the API can be called directly, bypassing CloudFront. Such a request carries no `X-Forwarded-For` header, and AWS WAF skips a forwarded-IP rule entirely when the header is absent — so it is not rate-limited either. An answer still requires a valid `x-api-key`, but while the service is scaled to zero a direct request can return a 503 and trigger an unauthenticated GPU scale-up. Closing this needs origin verification (a secret header injected by CloudFront and checked by WAF) or API-key validation at the edge; both add moving parts and are left as future work.
+- **Rate limiting is best-effort.** AWS WAF aggregates on the *first* address in `X-Forwarded-For`, and CloudFront appends the viewer IP to whatever the client already sent, so a client can influence the aggregation key. The rule raises the cost of casual abuse; it is not a guarantee.
 - **Cold start.** Inherent to GPU scale-to-zero — the trade for not paying ~$0.98/hour to idle.
 - **Scale ceiling.** A vCPU quota of 4 limits the demo to one `g6.xlarge` at a time, even though `max_capacity` is 3.
 - **Single-turn chat.** The UI sends the system prompt plus the current message only; there is no conversation history.

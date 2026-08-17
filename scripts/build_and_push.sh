@@ -22,9 +22,15 @@ REPO_URL="$1"
 REGISTRY="${REPO_URL%%/*}"
 REGION=$(echo "$REGISTRY" | cut -d. -f4)
 
-# HuggingFace token for downloading the model at image-build time. Required if the
-# model repo is gated; harmless (empty) if it is ungated. Export HF_TOKEN before running.
-HF_TOKEN="${HF_TOKEN:-}"
+# HuggingFace token for downloading the model at image-build time. The Gemma repo is
+# gated, so this is required. It is handed to the build as a BuildKit secret rather
+# than a build argument, which would persist in the image history.
+if [ -z "${HF_TOKEN:-}" ]; then
+    echo "  HF_TOKEN is not set. Accept the Gemma licence on Hugging Face, then:"
+    echo "  export HF_TOKEN=hf_..."
+    exit 1
+fi
+export HF_TOKEN
 
 echo "Registry: ${REGISTRY}"
 echo "Region:   ${REGION}"
@@ -39,7 +45,9 @@ echo ""
 
 # Build vLLM image (this downloads the model — takes 10-15 min first time)
 echo "→ Building vLLM image (this may take a while)..."
-docker build --provenance=false --sbom=false --build-arg HF_TOKEN="${HF_TOKEN}" -t "${REPO_URL}:vllm" containers/vllm/
+docker build --provenance=false --sbom=false \
+    --secret id=HF_TOKEN,env=HF_TOKEN \
+    -t "${REPO_URL}:vllm" containers/vllm/
 echo ""
 
 # Build proxy (auth-proxy sidecar) image

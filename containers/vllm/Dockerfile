@@ -1,9 +1,11 @@
+# syntax=docker/dockerfile:1
 FROM vllm/vllm-openai:v0.20.2-cu129-ubuntu2404
 
-ARG HF_TOKEN=""
-
-RUN HF_TOKEN="$HF_TOKEN" hf download \
-      google/gemma-4-E2B-it \
+# The Hugging Face token arrives as a BuildKit secret, not a build argument. Build
+# arguments persist in the image history and metadata, so anyone able to pull the
+# image could read the token; a secret is mounted only for this one instruction.
+RUN --mount=type=secret,id=HF_TOKEN,env=HF_TOKEN \
+    hf download google/gemma-4-E2B-it \
       --local-dir /models/gemma-4-E2B-it
 
 ENV INTERNAL_API_KEY=default

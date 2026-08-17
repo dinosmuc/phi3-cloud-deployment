@@ -101,8 +101,10 @@ resource "aws_wafv2_web_acl" "main" {
         // one budget across everyone behind the same edge. Count the client IP that
         // CloudFront forwards instead.
         //
-        // fallback_behavior MATCH blocks requests that arrive without the header,
-        // which also means the ALB only answers traffic that came through CloudFront.
+        // fallback_behavior MATCH blocks requests whose header value is malformed,
+        // which is the AWS-recommended pairing for a rule whose action is block. It
+        // does not cover a missing header: AWS WAF skips a forwarded-IP rule entirely
+        // when the header is absent. See the README limitations for what that means.
         aggregate_key_type = "FORWARDED_IP"
 
         forwarded_ip_config {

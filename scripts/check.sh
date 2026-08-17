@@ -1,8 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# Static checks and unit tests. Runs offline: no AWS credentials, no deployment,
-# no Docker. This is what CI runs on every push.
+# Static checks and unit tests. Needs no AWS credentials, no deployment and no
+# Docker — a fresh terraform init does still download providers from the registry.
+# This is what CI runs on every push.
 
 cd "$(dirname "$0")/.."
 

@@ -36,6 +36,14 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
+# Checked here as well as in build_and_push.sh, so a missing token fails before any
+# AWS resources are created rather than 10 minutes into the image build.
+if [ -z "${HF_TOKEN:-}" ]; then
+    echo "  HF_TOKEN is not set. The Gemma model repo is gated — accept the licence"
+    echo "  on Hugging Face, then: export HF_TOKEN=hf_..."
+    exit 1
+fi
+
 # Read a setting from terraform.tfvars, falling back to the default in variables.tf.
 # Only the two values needed to create the state bucket are read this way, because
 # that has to happen before Terraform runs. Everything else comes from outputs.
