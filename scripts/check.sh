@@ -20,7 +20,11 @@ terraform -chdir=terraform init -backend=false -input=false >/dev/null
 terraform -chdir=terraform validate
 
 echo "→ Shell script syntax..."
-bash -n scripts/*.sh
+# One invocation per file: `bash -n scripts/*.sh` passes the first path as the script
+# and every other path as its positional arguments, so only the first was checked.
+for script in scripts/*.sh; do
+    bash -n "$script"
+done
 
 echo "→ Python syntax..."
 python3 -m compileall -q containers/proxy

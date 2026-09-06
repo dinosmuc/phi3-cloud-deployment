@@ -57,13 +57,21 @@ echo ""
 # Build vLLM image (this downloads the model — takes 10-15 min first time)
 echo "→ Building vLLM image (this may take a while)..."
 docker build --provenance=false --sbom=false \
+    --platform=linux/amd64 \
     --secret id=HF_TOKEN,env=HF_TOKEN \
     -t "${REPO_URL}:vllm" containers/vllm/
 echo ""
 
 # Build proxy (auth-proxy sidecar) image
 echo "→ Building proxy image..."
-docker build --provenance=false --sbom=false -t "${REPO_URL}:proxy" containers/proxy/
+# ECS runs these on a g6.xlarge, which is x86_64. Without --platform, Docker builds for
+# the builder's own architecture, so an Apple Silicon or other ARM machine would push
+# arm64 images that fail on the instance with "exec format error". Building amd64 on an
+# ARM host goes through emulation and is slower, which is the right trade against an
+# image that cannot run at all.
+docker build --provenance=false --sbom=false \
+    --platform=linux/amd64 \
+    -t "${REPO_URL}:proxy" containers/proxy/
 echo ""
 
 # Push vLLM image

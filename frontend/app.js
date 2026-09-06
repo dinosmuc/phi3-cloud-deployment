@@ -130,6 +130,11 @@ async function streamReply(text, assistantDiv) {
         // Reassembles events split across chunk boundaries — see sse.js.
         const sse = new SSEBuffer();
         let fullText = "";
+        // vLLM terminates a healthy stream with "data: [DONE]". Without that marker the
+        // connection was cut short, and a partial answer would otherwise be presented
+        // as if the model had finished speaking.
+        let sawDone = false;
+        let streamError = "";
 
         while (true) {
             const { done, value } = await reader.read();
@@ -138,10 +143,21 @@ async function streamReply(text, assistantDiv) {
             const chunk = decoder.decode(value, { stream: true });
 
             for (const data of sse.push(chunk)) {
-                if (data === "[DONE]") continue;
+                if (data === "[DONE]") {
+                    sawDone = true;
+                    continue;
+                }
 
                 try {
                     const parsed = JSON.parse(data);
+
+                    // An error can arrive mid-stream, long after the 200 response header
+                    // was sent. Dropping it here used to surface as "(Empty response)"
+                    // with the actual cause visible only in the CloudWatch logs.
+                    if (parsed.error) {
+                        streamError = parsed.error.message || JSON.stringify(parsed.error);
+                        continue;
+                    }
 
                     // Final usage chunk: empty choices, optional usage stats.
                     // Log for observability and skip rendering.
@@ -165,8 +181,17 @@ async function streamReply(text, assistantDiv) {
             }
         }
 
-        if (!fullText) {
+        if (streamError) {
+            if (!fullText) {
+                assistantDiv.remove();
+            }
+            addMessage("error", "The model returned an error: " + streamError);
+        } else if (!fullText) {
             assistantDiv.textContent = "(Empty response)";
+        } else if (!sawDone) {
+            // Tokens arrived but the stream never terminated: say so rather than let a
+            // truncated reply pass for a complete one.
+            assistantDiv.textContent = fullText + "\n\n[connection lost \u2014 reply incomplete]";
         }
 
     } catch (error) {

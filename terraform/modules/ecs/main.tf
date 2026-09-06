@@ -457,11 +457,23 @@ resource "aws_ecs_service" "main" {
   desired_count   = 0
 
   // The task definition pins the mutable :vllm and :proxy tags, so re-pushing an image
-  // changes nothing Terraform can see: plan reports "No changes", no new revision is
-  // registered, and a warm service keeps serving the old code. This forces a rollout on
-  // every apply. It is a no-op while the service is scaled to zero, which is the normal
-  // idle state, so the cost is only on an apply against an already-running task.
+  // changes nothing Terraform can see, and updating an SSM secret leaves its ARN — and
+  // therefore the task definition — identical too. Either way a warm service would keep
+  // serving the old image and the old key.
+  //
+  // force_new_deployment on its own does not fix that: it only takes effect when
+  // Terraform has some other reason to update the resource, and with no diff there is
+  // no UpdateService call at all. The trigger below is what actually creates the diff,
+  // following HashiCorp's documented pattern for this exact case.
+  //
+  // The cost is that the ECS service now shows a change in every plan. That is the
+  // intended trade: the rollout is a no-op while the service sits at zero tasks, which
+  // is the normal idle state, and when it is warm the rollout is the whole point.
   force_new_deployment = true
+
+  triggers = {
+    redeployment = plantimestamp()
+  }
 
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.main.name

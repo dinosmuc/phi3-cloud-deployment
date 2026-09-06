@@ -95,9 +95,11 @@ echo "  State:    s3://${STATE_BUCKET}"
 # reading it needs servicequotas:GetServiceQuota, which not every deploy role has.
 GPU_QUOTA=$(aws service-quotas get-service-quota \
     --service-code ec2 --quota-code L-DB2E81BA --region "$REGION" \
-    --query Value --output text 2>/dev/null || echo "unknown")
+    --query 'Quota.Value' --output text 2>/dev/null || echo "unknown")
 
-if [ "$GPU_QUOTA" = "unknown" ]; then
+# Anything that is not a plain number — "unknown", "None", an empty string — is treated
+# as unreadable, so a changed response shape can never reach the integer comparison.
+if ! printf '%s' "$GPU_QUOTA" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
     echo "  GPU quota: could not read it — check it manually in Service Quotas."
 elif [ "${GPU_QUOTA%%.*}" -lt 4 ]; then
     echo "  GPU quota: ${GPU_QUOTA%%.*} vCPU — WARNING, a g6.xlarge needs 4."
