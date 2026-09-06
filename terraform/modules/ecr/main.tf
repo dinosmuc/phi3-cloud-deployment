@@ -40,6 +40,23 @@ resource "aws_ecr_lifecycle_policy" "main" {
           countNumber   = 5
         }
         action = { type = "expire" }
+      },
+      // Both rules above select tagStatus = "tagged", and only one image ever holds
+      // :vllm or :proxy at a time, so neither can reach a count of five and neither
+      // ever fires. Re-pushing a mutable tag moves it and leaves the previous image
+      // UNTAGGED, which a "tagged" rule can never select — so every rebuild used to
+      // strand another ~18 GB in the repository permanently. This is the rule that
+      // actually reclaims anything.
+      {
+        rulePriority = 3
+        description  = "Expire untagged images after 1 day"
+        selection = {
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = 1
+        }
+        action = { type = "expire" }
       }
     ]
   })

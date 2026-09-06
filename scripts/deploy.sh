@@ -7,6 +7,25 @@ echo ""
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TFVARS="${REPO_ROOT}/terraform/terraform.tfvars"
 
+# Non-interactive mode. AUTO_APPROVE=1 ./scripts/deploy.sh runs end to end without
+# prompting, which is what CI, cron or a piped run needs. It also fixes a trap: with
+# `set -e`, a bare `read` reaching end-of-input returns 1 and kills the script with no
+# message at all, so `./scripts/deploy.sh < /dev/null` used to die silently.
+AUTO_APPROVE="${AUTO_APPROVE:-0}"
+
+confirm_step() {
+    if [ "$AUTO_APPROVE" = "1" ]; then
+        echo "  $1 (auto-approved)"
+        echo ""
+        return 0
+    fi
+
+    local reply
+    read -r -p "  $1 Type 'yes' to confirm: " reply || reply=""
+    echo ""
+    [ "$reply" = "yes" ]
+}
+
 
 # PREFLIGHT
 # Fail early with a clear message instead of half-way through an apply.
@@ -36,6 +55,16 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
+# The image build is BuildKit-only: build_and_push.sh passes --provenance/--sbom
+# (Buildx flags) and the vLLM Dockerfile uses RUN --mount=type=secret. Plain
+# `docker build` only routes to Buildx from Docker Engine 23.0 onwards, so an older
+# daemon fails at step 2 — after the state bucket and ECR repository already exist.
+if ! docker buildx version >/dev/null 2>&1; then
+    echo "  docker buildx is missing. The image build needs BuildKit (Docker >= 23)."
+    echo "  Install the docker-buildx-plugin package, then re-run."
+    exit 1
+fi
+
 # Checked here as well as in build_and_push.sh, so a missing token fails before any
 # AWS resources are created rather than 10 minutes into the image build.
 if [ -z "${HF_TOKEN:-}" ]; then
@@ -49,7 +78,7 @@ fi
 # that has to happen before Terraform runs. Everything else comes from outputs.
 tfvar() {
     local value
-    value=$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$TFVARS" | head -1 | cut -d'"' -f2 || true)
+    value=$(grep -E "^[[:space:]]*$1[[:space:]]*=" "$TFVARS" | head -1 | cut -d'"' -s -f2 || true)
     echo "${value:-$2}"
 }
 
@@ -60,6 +89,23 @@ STATE_BUCKET="${PROJECT_NAME}-tfstate-${ACCOUNT_ID}"
 echo "  Account:  ${ACCOUNT_ID}"
 echo "  Region:   ${REGION}"
 echo "  State:    s3://${STATE_BUCKET}"
+
+# A brand-new AWS account has a GPU quota of 0, which is the single most common way
+# this stack applies cleanly and then never launches an instance. Only a warning:
+# reading it needs servicequotas:GetServiceQuota, which not every deploy role has.
+GPU_QUOTA=$(aws service-quotas get-service-quota \
+    --service-code ec2 --quota-code L-DB2E81BA --region "$REGION" \
+    --query Value --output text 2>/dev/null || echo "unknown")
+
+if [ "$GPU_QUOTA" = "unknown" ]; then
+    echo "  GPU quota: could not read it — check it manually in Service Quotas."
+elif [ "${GPU_QUOTA%%.*}" -lt 4 ]; then
+    echo "  GPU quota: ${GPU_QUOTA%%.*} vCPU — WARNING, a g6.xlarge needs 4."
+    echo "             Request 'Running On-Demand G and VT instances' in Service"
+    echo "             Quotas, or the GPU task will stay pending forever."
+else
+    echo "  GPU quota: ${GPU_QUOTA%%.*} vCPU"
+fi
 echo ""
 
 
@@ -114,9 +160,7 @@ echo ""
 # create the task definition referencing images that aren't in ECR yet, leaving
 # the first request to fail with an image-pull error. So create ECR first.
 echo "→ Step 1/3: Creating the ECR repository (terraform apply -target=module.ecr)..."
-read -p "  Apply ECR repository? Type 'yes' to confirm: " confirm
-echo ""
-if [ "$confirm" != "yes" ]; then
+if ! confirm_step "Apply ECR repository?"; then
     echo "  Cancelled. Nothing was applied."
     exit 0
 fi
@@ -137,10 +181,7 @@ echo "→ Step 3/3: Planning the remaining infrastructure..."
 terraform plan -out=tfplan
 echo ""
 
-read -p "  Apply these changes? Type 'yes' to confirm: " confirm
-echo ""
-
-if [ "$confirm" != "yes" ]; then
+if ! confirm_step "Apply these changes?"; then
     rm -f tfplan
     echo "  Cancelled. ECR and images exist, but the rest of the stack was not applied."
     exit 0

@@ -32,6 +32,17 @@ if [ -z "${HF_TOKEN:-}" ]; then
 fi
 export HF_TOKEN
 
+# Both builds below need BuildKit: --provenance/--sbom are Buildx flags, and the vLLM
+# Dockerfile mounts the token with RUN --mount=type=secret. `docker build` only routes
+# to Buildx from Docker Engine 23.0, and an inherited DOCKER_BUILDKIT=0 would opt back
+# out of it, so pin it on rather than trusting the environment.
+if ! docker buildx version >/dev/null 2>&1; then
+    echo "  docker buildx is missing. This build needs BuildKit (Docker >= 23)."
+    echo "  Install the docker-buildx-plugin package, then re-run."
+    exit 1
+fi
+export DOCKER_BUILDKIT=1
+
 echo "Registry: ${REGISTRY}"
 echo "Region:   ${REGION}"
 echo "Repo:     ${REPO_URL}"

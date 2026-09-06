@@ -1,4 +1,6 @@
 import os
+import secrets
+
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -20,7 +22,13 @@ async def health():
 
 @app.post("/v1/chat/completions")
 async def chat(request: Request, x_api_key: str = Header(default="")):
-    if x_api_key != PUBLIC_API_KEY:
+    # Constant-time comparison, so the time taken to reject a wrong key does not leak
+    # how many leading characters were right. Compared as bytes because compare_digest
+    # rejects non-ASCII str. The PUBLIC_API_KEY guard has to come first: without it an
+    # unset key would compare equal to a missing header and let every request through.
+    if not PUBLIC_API_KEY or not secrets.compare_digest(
+        x_api_key.encode("utf-8"), PUBLIC_API_KEY.encode("utf-8")
+    ):
         raise HTTPException(401, "Invalid or missing API key.")
 
     upstream_request = client.build_request(

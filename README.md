@@ -38,7 +38,7 @@ A personal project exploring end-to-end LLM deployment on AWS — the model runs
 |---|---|---|---|
 | Terraform | 1.15.6 | 1.10.0 | everything (`use_lockfile` needs ≥ 1.10) |
 | AWS CLI | 2.34.0 | 2.x | deploy, state bucket, cache invalidation |
-| Docker | 29.5.3 | 20.x | building the images |
+| Docker | 29.5.3 | 23.0 | building the images (needs BuildKit/Buildx) |
 | Python | 3.14 (image) / 3.11 (local tests) | 3.11 | proxy + tests |
 | Node.js | 24 | 22 | frontend tests only |
 
@@ -70,9 +70,16 @@ export HF_TOKEN=hf_...
 ./scripts/deploy.sh
 ```
 
+`deploy.sh` prompts twice before it changes anything. To run it unattended — in CI, from
+a cron job, or just piped — set `AUTO_APPROVE=1`, which answers both prompts:
+
+```bash
+AUTO_APPROVE=1 ./scripts/deploy.sh      # and likewise for ./scripts/destroy.sh
+```
+
 `deploy.sh` does everything, in the order that matters:
 
-1. **Preflight** — checks the tools, credentials, Docker daemon and `terraform.tfvars`, and fails early with a clear message if anything is missing.
+1. **Preflight** — checks the tools (including `docker buildx`, which the image build requires), credentials, Docker daemon, `HF_TOKEN` and `terraform.tfvars`, and fails early with a clear message if anything is missing. It also warns when the account's GPU vCPU quota is below 4, the most common reason the stack applies cleanly and then never launches an instance.
 2. **State backend** — Terraform cannot create its own backend, so the script creates an S3 bucket named `<project_name>-tfstate-<your-account-id>` (versioned, encrypted, public access blocked), writes `terraform/backend.hcl`, and runs `terraform init -backend-config=backend.hcl`. The account ID keeps the globally-unique bucket name collision-free, which is why nothing is hardcoded. Re-runs reuse the existing bucket.
 3. **ECR first** — the repository has to exist before images can be pushed, so it is applied on its own with `-target=module.ecr`.
 4. **Build and push** — the repository URL is read back with `terraform output -raw ecr_repository_url` and passed to `build_and_push.sh`, so the build can never target a different repo or region than the one ECS reads from. The vLLM image bakes in the model weights and takes 10–15 min the first time.
@@ -101,36 +108,48 @@ The **first request after idle** triggers a cold start (~5 min when warm, up to 
 ## Checks
 
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r tests/requirements.txt
 ./scripts/check.sh
 ```
+
+The virtualenv is not optional on Debian, Ubuntu 23.04+, Fedora and Amazon Linux: their
+system Python is marked externally managed, so a bare `pip install` refuses to run.
 
 Runs without AWS credentials, deployment or Docker (a fresh `terraform init` does download providers from the registry):
 
 - `terraform fmt -check` and `terraform validate` (with `-backend=false`)
 - shell syntax (`bash -n`) and Python syntax
-- **proxy tests** — a missing or wrong `x-api-key` is rejected with 401; a valid one is swapped for the internal Bearer token and the streamed response passes through byte-for-byte
+- **proxy tests** — a missing, wrong or unconfigured `x-api-key` is rejected with 401; a valid one is swapped for the internal Bearer token and the streamed response passes through byte-for-byte
 - **frontend test** — an SSE event split across network chunks is reassembled, checked at every possible split point
+- **config tests** — the checks a clean clone depends on: `terraform.tfvars.example` declares every variable that has no default, its placeholder keys are the ones `variables.tf` refuses to deploy, `app.js` and the module that renders it agree on the template variables and pass them through `jsonencode`, `deploy.sh`'s own tfvars parser reads the example correctly, and both scripts support `AUTO_APPROVE`
 
 The same script runs in GitHub Actions on every push and pull request (`.github/workflows/ci.yml`). CI never touches AWS and needs no secrets.
 
 ## Teardown
 
 ```bash
-./scripts/destroy.sh        # or: cd terraform && terraform destroy
+./scripts/destroy.sh                    # AUTO_APPROVE=1 to skip the prompt
 ```
+
+`destroy.sh` re-creates `backend.hcl` if it is missing, so it works from a fresh clone
+too — but it still needs `terraform/terraform.tfvars`, because Terraform requires values
+for the variables that have no default before it can build a destroy plan.
 
 If `destroy` times out while the ECS service drains, just run it again. The state bucket is created outside the stack and is left alone — delete it manually if you no longer need it.
 
 ## Cost
 
-Idle baseline ≈ **$0.14/hour** (~$100/month), continuous, whether or not anyone uses it:
+Idle baseline ≈ **$0.16/hour** (~$118/month), continuous, whether or not anyone uses it:
 
 | Component | Approx. hourly |
 |---|---|
 | 2 × NAT Gateway | $0.104 |
 | ALB | $0.027 |
+| Public IPv4 (2 × ALB, 2 × NAT EIP) | $0.020 |
 | WAF (web ACL + 2 rules) | $0.010 |
+
+On top of that, ECR storage for the ~18 GB vLLM image is about $1.80/month.
 
 The GPU (~$0.98/hour for `g6.xlarge`) runs only while serving. Tear the stack down between sessions to avoid the idle baseline — that is the single biggest saving.
 
@@ -154,7 +173,11 @@ The GPU (~$0.98/hour for `g6.xlarge`) runs only while serving. Tear the stack do
 - **Cold start.** Inherent to GPU scale-to-zero — the trade for not paying ~$0.98/hour to idle.
 - **Scale ceiling.** A vCPU quota of 4 limits the demo to one `g6.xlarge` at a time, even though `max_capacity` is 3.
 - **Single-turn chat.** The UI sends the system prompt plus the current message only; there is no conversation history.
+- **The WAF's body rules are counted, not blocked.** Five rules in the AWS Core Rule Set inspect the request body, which for a chat API is the user's own prose — they reject a pasted article (over 8 KB), a question containing `<script>`, a `../` path or a URL with an IPv4 host. They are overridden to `Count`, so they still report to CloudWatch but no longer block. Every other rule in the group, and the rate limit, still block.
+- **Scale-out beyond one task is effectively inert.** The target-tracking policy aims at 600 ALB requests per target per minute — 10 requests a second against a single GPU. Streaming inference saturates long before that, so latency alarms fire first and the 1 → N step never triggers. Picking an honest threshold needs load testing this project has not done; the 0 → 1 wake and the N → 0 idle scale-in both work as described.
+- **Scale-in is all-or-nothing.** Capacity only ever returns to zero, and only after 15 consecutive minutes of no ALB requests at all. There is no graduated 3 → 2 → 1 step, and a single leftover browser tab polling `/health` is enough to hold the fleet up.
+- **Availability zones are chosen by index.** The two subnets take the first two AZs the region reports, without checking that `g6` instances are actually offered there — AZ names map to different physical zones per account. If they are not, `terraform apply` still succeeds and the GPU task simply stays pending. `deploy.sh` warns when the GPU vCPU quota is below 4, which is the more common cause.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

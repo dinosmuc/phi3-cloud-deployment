@@ -91,9 +91,14 @@ resource "aws_s3_object" "sse_js" {
 resource "aws_s3_object" "app_js" {
   bucket = aws_s3_bucket.frontend.id
   key    = "app.js"
+  // Both values are JSON-encoded here rather than quoted inside the template, so
+  // app.js declares them as bare `const X = ${x};`. Terraform then emits the quotes
+  // and all the escaping: a system_prompt containing a double quote, a backslash or a
+  // newline used to render an unparseable app.js, which silently killed the whole UI
+  // while terraform apply still reported success.
   content = templatefile("${path.module}/../../../frontend/app.js", {
-    alb_url       = ""
-    system_prompt = var.system_prompt
+    alb_url       = jsonencode("")
+    system_prompt = jsonencode(var.system_prompt)
   })
   content_type = "application/javascript"
 }
@@ -122,6 +127,14 @@ resource "aws_cloudfront_distribution" "frontend" {
       https_port             = 443
       origin_protocol_policy = "http-only"
       origin_ssl_protocols   = ["TLSv1.2"]
+
+      // CloudFront's origin response timeout defaults to 30 s and is the binding
+      // constraint on this path — the ALB's idle_timeout of 300 s never gets a chance
+      // to apply. It measures the gap between response packets, so a live SSE stream
+      // resets it on every token; what it really caps is time-to-first-token, and on a
+      // POST CloudFront drops the connection without retrying. 60 s is the maximum
+      // allowed without requesting a quota increase.
+      origin_read_timeout = 60
     }
   }
 

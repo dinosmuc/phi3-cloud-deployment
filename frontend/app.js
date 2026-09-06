@@ -1,9 +1,9 @@
-const API_URL = "${alb_url}";
+const API_URL = ${alb_url};
 
 // System prompt is injected by Terraform via templatefile() — see modules/frontend/main.tf.
 // The string is declared in terraform/variables.tf and can be overridden per-environment
 // from terraform.tfvars; the default establishes the chatbot persona.
-const SYSTEM_PROMPT = "${system_prompt}";
+const SYSTEM_PROMPT = ${system_prompt};
 
 let apiKey = "";
 let isGenerating = false;
@@ -76,6 +76,14 @@ async function sendMessage() {
     // Create assistant message bubble
     const assistantDiv = addMessage("assistant", "");
 
+    await streamReply(text, assistantDiv);
+}
+
+// Everything from the request onwards, kept separate from sendMessage() so that the
+// cold-start retry can re-send the same prompt into the SAME two bubbles. Calling
+// sendMessage() again would re-run addMessage("user", text) and leave the user's
+// message in the transcript twice — which happened on every cold start.
+async function streamReply(text, assistantDiv) {
     try {
         const response = await fetch(API_URL + "/v1/chat/completions", {
             method: "POST",
@@ -202,13 +210,13 @@ async function retryUntilReady(text, messageDiv) {
         try {
             const response = await fetch(API_URL + "/health");
             if (response.ok) {
-                messageDiv.remove();
-                // Service is ready — re-stage the original prompt and re-send it
-                userInput.value = text;
-                isGenerating = false;
-                sendBtn.disabled = false;
-                userInput.disabled = false;
-                sendMessage();
+                // Service is ready. Reuse the bubbles that are already on screen and
+                // stream into them; the input stays disabled until streamReply() is
+                // done and calls resetInput().
+                messageDiv.textContent = "";
+                status.textContent = "Generating...";
+                status.className = "status connecting";
+                await streamReply(text, messageDiv);
                 return;
             }
         } catch (e) {

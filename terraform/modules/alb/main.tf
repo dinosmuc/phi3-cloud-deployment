@@ -74,6 +74,55 @@ resource "aws_wafv2_web_acl" "main" {
       managed_rule_group_statement {
         vendor_name = "AWS"
         name        = "AWSManagedRulesCommonRuleSet"
+
+        // Five rules in this group inspect the request BODY, which for a chat API is
+        // the user's free-form prose — so with the group's default Block action they
+        // reject legitimate messages, not attacks. Each is switched to Count: the rule
+        // still evaluates and still reports to CloudWatch, but it no longer blocks.
+        // Everything else in the Core Rule Set (headers, URI, query string, bad bots)
+        // keeps blocking, which is what actually protects this endpoint.
+        //
+        // What each one rejects in practice:
+        //   SizeRestrictions_BODY    bodies over 8 KB — pasting an article to summarise.
+        //                            The 8 KB inspection limit is fixed for an ALB.
+        //   CrossSiteScripting_BODY  "what does <script>alert(1)</script> do?"
+        //   GenericLFI_BODY          any "../" in a question about file paths.
+        //   GenericRFI_BODY          URLs with IPv4 hosts, e.g. http://127.0.0.1:8000.
+        //   EC2MetaDataSSRF_BODY     asking the model about 169.254.169.254.
+        rule_action_override {
+          name = "SizeRestrictions_BODY"
+          action_to_use {
+            count {}
+          }
+        }
+
+        rule_action_override {
+          name = "CrossSiteScripting_BODY"
+          action_to_use {
+            count {}
+          }
+        }
+
+        rule_action_override {
+          name = "GenericLFI_BODY"
+          action_to_use {
+            count {}
+          }
+        }
+
+        rule_action_override {
+          name = "GenericRFI_BODY"
+          action_to_use {
+            count {}
+          }
+        }
+
+        rule_action_override {
+          name = "EC2MetaDataSSRF_BODY"
+          action_to_use {
+            count {}
+          }
+        }
       }
     }
 

@@ -60,6 +60,16 @@ def test_missing_api_key_is_rejected(client):
     assert response.status_code == 401
 
 
+def test_unconfigured_public_key_rejects_everything(client, monkeypatch):
+    # If PUBLIC_API_KEY were ever unset, a constant-time compare of two empty values
+    # would succeed and open the endpoint. The proxy must fail closed instead.
+    monkeypatch.setattr(main, "PUBLIC_API_KEY", None)
+
+    response = client.post("/v1/chat/completions", headers={"x-api-key": ""}, json={})
+
+    assert response.status_code == 401
+
+
 def test_wrong_api_key_is_rejected(client):
     response = client.post(
         "/v1/chat/completions",

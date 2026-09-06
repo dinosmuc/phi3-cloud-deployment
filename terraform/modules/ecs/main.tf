@@ -205,11 +205,25 @@ resource "aws_launch_template" "ecs" {
       volume_size           = 100
       volume_type           = "gp3"
       delete_on_termination = true
+
+      // The root volume holds the unpacked ~18 GB vLLM image, model weights included.
+      // Uses the AWS-managed alias/aws/ebs key, so no KMS resource and no extra cost.
+      encrypted = true
     }
   }
 
   monitoring {
     enabled = true
+  }
+
+  // Require IMDSv2. The instance profile carries the ECS agent's credentials, so with
+  // IMDSv1 still reachable any request-forgery bug on the box can read them with a
+  // plain GET. The hop limit is 2 rather than the stricter 1 because the ECS agent
+  // reaches the metadata service across a container network hop.
+  metadata_options {
+    http_endpoint               = "enabled"
+    http_tokens                 = "required"
+    http_put_response_hop_limit = 2
   }
 
   tag_specifications {
@@ -442,6 +456,13 @@ resource "aws_ecs_service" "main" {
   task_definition = aws_ecs_task_definition.main.arn
   desired_count   = 0
 
+  // The task definition pins the mutable :vllm and :proxy tags, so re-pushing an image
+  // changes nothing Terraform can see: plan reports "No changes", no new revision is
+  // registered, and a warm service keeps serving the old code. This forces a rollout on
+  // every apply. It is a no-op while the service is scaled to zero, which is the normal
+  // idle state, so the cost is only on an apply against an already-running task.
+  force_new_deployment = true
+
   capacity_provider_strategy {
     capacity_provider = aws_ecs_capacity_provider.main.name
     weight            = 1
@@ -502,7 +523,11 @@ resource "aws_appautoscaling_policy" "scale_out_wake" {
   scalable_dimension = aws_appautoscaling_target.ecs.scalable_dimension
 
   step_scaling_policy_configuration {
-    adjustment_type = "ExactCapacity"
+    // ChangeInCapacity, not ExactCapacity: this policy must be a floor, never an
+    // absolute. A 503 is also what an overloaded or health-flapping fleet emits, and
+    // "set capacity to exactly 1" would answer that by stopping every task but one —
+    // scaling in during a spike. +1 can only add, and max_capacity still caps it.
+    adjustment_type = "ChangeInCapacity"
     cooldown        = 60
 
     step_adjustment {
